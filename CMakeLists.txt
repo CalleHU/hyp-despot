@@ -3,16 +3,16 @@ cmake_minimum_required(VERSION 3.8)
 set(CUDA_SDK_ROOT_DIR "/usr/local/cuda/samples")
 
 
-project(hyp_despot CXX CUDA)
+project(hypdespot CXX CUDA)
 
 
 if(NOT DEFINED CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 11)
+  set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CXX_STANDARD_REQUIRED True)
 endif()
 
 if(NOT DEFINED CMAKE_CUDA_STANDARD)
-  set(CMAKE_CUDA_STANDARD 11)
+  set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED True)
 endif()
 
@@ -25,7 +25,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG -march=native")
 set(BINARY_INSTALL_PATH "bin" CACHE PATH "Binary install path")
 set(LIBRARY_INSTALL_PATH "lib" CACHE PATH "Library install path")
 set(INCLUDE_INSTALL_PATH "include" CACHE PATH "Include install path")
-set(CONFIG_INSTALL_PATH "${LIBRARY_INSTALL_PATH}/GPUmodel/cmake")
+set(CONFIG_INSTALL_PATH "${LIBRARY_INSTALL_PATH}/hypdespot/cmake")
 
 set(DESPOT_BUILD_EXAMPLES ON CACHE BOOL "Build C++ model examples")
 set(DESPOT_BUILD_POMDPX ON CACHE BOOL "Build POMDPX example")
@@ -85,10 +85,29 @@ target_link_libraries("${PROJECT_NAME}"
   ${TinyXML_LIBRARIES}
 )
 
+install(TARGETS "${PROJECT_NAME}"
+  EXPORT "HypDespotTargets"
+  ARCHIVE DESTINATION "${LIBRARY_INSTALL_PATH}"
+  LIBRARY DESTINATION "${LIBRARY_INSTALL_PATH}"
+  RUNTIME DESTINATION "${BINARY_INSTALL_PATH}"
+)
+install(DIRECTORY "src/HypDespot/include/"
+  DESTINATION "${INCLUDE_INSTALL_PATH}/${PROJECT_NAME}"
+)
+
 # Install a DespotConfig.cmake file so CMake can find_package(Despot).
 include(CMakePackageConfigHelpers)
-configure_package_config_file("cmake/DespotConfig.cmake.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/DespotConfig.cmake"
+configure_package_config_file("cmake/HypDespotConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/HypDespotConfig.cmake"
   INSTALL_DESTINATION "${CONFIG_INSTALL_PATH}"
   PATH_VARS INCLUDE_INSTALL_PATH
 )
+
+install(EXPORT "HypDespotTargets"
+  FILE "HypDespotTargets.cmake"
+  DESTINATION "${CONFIG_INSTALL_PATH}"
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/HypDespotConfig.cmake"
+  DESTINATION "${CONFIG_INSTALL_PATH}"
+)
+

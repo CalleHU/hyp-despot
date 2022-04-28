@@ -280,6 +280,7 @@ Shared_VNode* DESPOT::Trial(Shared_VNode* root, RandomStreams& streams,
 
 	return cur;
 }
+
 void DESPOT::ExploitBlockers(VNode* vnode) {
 	if (Globals::config.pruning_constant <= 0) {
 		logd << "Return: small pruning " << Globals::config.pruning_constant
@@ -371,8 +372,9 @@ void DESPOT::ExpandTreeServer(RandomStreams streams,
                               double& explore_time, double& backup_time, int& num_trials,
                               double timeout, MsgQueque<Shared_VNode>& node_queue,
                               MsgQueque<Shared_VNode>& print_queue, int threadID) {
-	//cout << "Create expansion thread " << this_thread::get_id() << endl;
-	Globals::ChooseGPUForThread();			//otherwise the GPUID would be 0 (default)
+    if (Globals::config.useGPU) {
+	    Globals::ChooseGPUForThread();			//otherwise the GPUID would be 0 (default)
+    }
 	Globals::AddMappedThread(this_thread::get_id(), threadID);
 	used_time = 0;
 	explore_time = 0;
@@ -395,6 +397,7 @@ void DESPOT::ExpandTreeServer(RandomStreams streams,
 		root->visit_count_++;
 
 		bool Expansion_done = false;
+	    //cout << this_thread::get_id() << " performing trial" << endl;
 		VNode* cur = Trial(root, streams, lower_bound, upper_bound, model,
 		                   history, Expansion_done, statistics);
 
@@ -530,6 +533,9 @@ VNode* DESPOT::ConstructTree(vector<State*>& particles, RandomStreams& streams,
 		double thread_backup_time[Globals::config.NUM_THREADS];
 		int num_trials_t[Globals::config.NUM_THREADS];
 		for (int i = 0; i < Globals::config.NUM_THREADS; i++) {
+            if (static_cast<Shared_VNode*>(root) == NULL) {
+                cout << "Root is NULL" << endl;
+            }
 			Expand_queue.send(static_cast<Shared_VNode*>(root));
 			thread_used_time[i] = used_time;
 			thread_explore_time[i] = 0;
@@ -891,6 +897,388 @@ ValuedAction DESPOT::Search() {
 	return astar;
 }
 
+std::vector<std::vector<ValuedAction>> DESPOT::SearchSequence() {
+	if (logging::level() >= logging::DEBUG) {
+		model_->PrintBelief(*belief_);
+	}
+	Num_searches++;
+	//model_->PrintBelief(*belief_); // for debugging
+
+	//if (Globals::config.time_per_move <= 0) // Return a random action if no time is allocated for planning
+	//	return ValuedAction(Random::RANDOM.NextInt(model_->NumActions()),
+	//	                    Globals::NEG_INFTY);
+
+	double start = get_time_second();
+
+	if (Debug_mode){
+		step_counter++;
+	}
+
+	vector<State*> particles;
+	if (FIX_SCENARIO == 1) {
+		ifstream fin;
+		string particle_file = "Particles" + std::to_string(step_counter) + ".txt";
+		fin.open(particle_file, std::ios::in);
+		if(!fin.is_open()){
+			cerr << "Unable to open particle file " << particle_file << endl;
+			exit(1);
+		}
+		particles.resize(Globals::config.num_scenarios);
+		model_->ImportStateList(particles, fin);
+		fin.close();
+
+		logi << "[FIX_SCENARIO] particles read from file "<< particle_file << endl;
+	} else {
+		if(Debug_mode)
+			std::srand(0);
+		particles = belief_->Sample(Globals::config.num_scenarios);
+	}
+	logi << "[DESPOT::Search] Time for sampling " << particles.size()
+	     << " particles: " << (get_time_second() - start) << "s" << endl;
+
+	if (FIX_SCENARIO == 2) {
+		for (int i = 0; i < particles.size(); i++) {
+			particles[i]->scenario_id = i;
+		}
+		if (InitialSearch)
+		{
+			ofstream fout;
+			string particle_file = "Particles" + std::to_string(step_counter) + ".txt";
+			fout.open(particle_file, std::ios::trunc);
+			assert(fout.is_open());
+			fout << particles.size() << endl;
+			for (int i = 0; i < Globals::config.num_scenarios; i++) {
+				model_->ExportState(*particles[i], fout);
+			}
+
+			fout.close();
+			InitialSearch = false;
+		}
+		else
+		{
+			ofstream fout;
+			string particle_file = "Particles" + std::to_string(step_counter) + ".txt";
+			fout.open(particle_file, std::ios::trunc);
+			assert(fout.is_open());
+			fout << particles.size() << endl;
+			for (int i = 0; i < Globals::config.num_scenarios; i++) {
+				model_->ExportState(*particles[i], fout);
+			}
+			fout.close();
+		}
+	}
+
+	if (Debug_mode)
+		;//model_->PrintParticles(particles);
+	else{
+		if (Globals::config.silence != true) {
+			model_->PrintParticles(particles);
+		}
+	}
+	statistics_ = Shared_SearchStatistics();
+
+	start = get_time_second();
+	static RandomStreams streams;
+
+	if (FIX_SCENARIO == 1 || Debug_mode) {
+		std::ifstream fin;
+		string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+
+		fin.open(stream_file, std::ios::in);
+		streams.ImportStream(fin, Globals::config.num_scenarios,
+		                     Globals::config.search_depth);
+
+		fin.close();
+		cout << "[FIX_SCENARIO] random streams read from file "<< stream_file << endl;
+	} else {
+		streams = RandomStreams(Globals::config.num_scenarios,
+		                        Globals::config.search_depth);
+	}
+
+	if (FIX_SCENARIO == 2) {
+		std::ofstream fout;
+		string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+		fout.open(stream_file, std::ios::trunc);
+		fout << streams;
+		fout.close();
+	}
+
+	LookaheadUpperBound* ub = dynamic_cast<LookaheadUpperBound*>(upper_bound_);
+	if (ub != NULL) { // Avoid using new streams for LookaheadUpperBound
+		static bool initialized = false;
+		if (!initialized) {
+			lower_bound_->Init(streams);
+			upper_bound_->Init(streams);
+			initialized = true;
+		}
+	} else {
+		if (FIX_SCENARIO == 1 || Debug_mode) {
+			std::ifstream fin;
+			string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+
+			fin.open(stream_file, std::ios::in);
+			streams.ImportStream(fin, Globals::config.num_scenarios,
+			                     Globals::config.search_depth);
+			fin.close();
+
+		} else {
+			streams = RandomStreams(Globals::config.num_scenarios,
+			                        Globals::config.search_depth);
+		}
+		if (FIX_SCENARIO == 2) {
+			std::ofstream fout;
+			string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+
+			fout.open(stream_file, std::ios::trunc);
+			fout << streams;
+			fout.close();
+		}
+		lower_bound_->Init(streams);
+		upper_bound_->Init(streams);
+	}
+
+
+	if (use_GPU_) {
+		PrepareGPUStreams(streams);
+		for (int i = 0; i < particles.size(); i++) {
+			particles[i]->scenario_id = i;
+		}
+	}
+
+
+	root_ = ConstructTree(particles, streams, lower_bound_, upper_bound_,
+	                      model_, history_, Globals::config.time_per_move, &statistics_);
+	logi << "[DESPOT::Search] Time for tree construction: "
+	     << (get_time_second() - start) << "s" << endl;
+
+	auto action_sequence = OptimalActionSequence(root_, lower_bound_, upper_bound_, model_, streams, history_);
+
+	start = get_time_second();
+	root_->Free(*model_);
+
+	if (use_GPU_)
+		model_->DeleteGPUParticles(MEMORY_MODE(RESET));
+
+	logi << "[DESPOT::Search] Time for freeing particles in search tree: "
+	     << (get_time_second() - start) << "s" << endl;
+
+
+	start = get_time_second();
+	ValuedAction astar = OptimalAction(root_);
+
+	delete root_;
+
+	logi << "[DESPOT::Search] Time for deleting tree: "
+	     << (get_time_second() - start) << "s" << endl;
+
+	logi << "[DESPOT::Search] Search statistics:" << endl << statistics_
+	     << endl;
+
+	assert(use_GPU_ == Globals::config.useGPU);
+	if (use_GPU_) {
+		PrintGPUData(Num_searches);
+		cout << "[DESPOT::Search] Search statistics:" << endl << statistics_
+		     << endl;
+
+	} else {
+		PrintCPUTime(Num_searches);
+		cout << "[DESPOT::Search] Search statistics:" << endl << statistics_
+		     << endl;
+	}
+	Initial_upper.push_back(statistics_.initial_ub);
+	Initial_lower.push_back(statistics_.initial_lb);
+	Final_upper.push_back(statistics_.final_ub);
+	Final_lower.push_back(statistics_.final_lb);
+
+	return action_sequence;
+}
+
+VNode* DESPOT::ConstructDESPOT() {
+  	if (logging::level() >= logging::DEBUG) {
+		model_->PrintBelief(*belief_);
+	}
+	Num_searches++;
+	//model_->PrintBelief(*belief_); // for debugging
+
+	//if (Globals::config.time_per_move <= 0) // Return a random action if no time is allocated for planning
+	//	return ValuedAction(Random::RANDOM.NextInt(model_->NumActions()),
+	//	                    Globals::NEG_INFTY);
+
+	double start = get_time_second();
+
+	if (Debug_mode){
+		step_counter++;
+	}
+
+	vector<State*> particles;
+	if (FIX_SCENARIO == 1) {
+		ifstream fin;
+		string particle_file = "Particles" + std::to_string(step_counter) + ".txt";
+		fin.open(particle_file, std::ios::in);
+		if(!fin.is_open()){
+			cerr << "Unable to open particle file " << particle_file << endl;
+			exit(1);
+		}
+		particles.resize(Globals::config.num_scenarios);
+		model_->ImportStateList(particles, fin);
+		fin.close();
+
+		logi << "[FIX_SCENARIO] particles read from file "<< particle_file << endl;
+	} else {
+		if(Debug_mode)
+			std::srand(0);
+		particles = belief_->Sample(Globals::config.num_scenarios);
+	}
+	logi << "[DESPOT::Search] Time for sampling " << particles.size()
+	     << " particles: " << (get_time_second() - start) << "s" << endl;
+
+	if (FIX_SCENARIO == 2) {
+		for (int i = 0; i < particles.size(); i++) {
+			particles[i]->scenario_id = i;
+		}
+		if (InitialSearch)
+		{
+			ofstream fout;
+			string particle_file = "Particles" + std::to_string(step_counter) + ".txt";
+			fout.open(particle_file, std::ios::trunc);
+			assert(fout.is_open());
+			fout << particles.size() << endl;
+			for (int i = 0; i < Globals::config.num_scenarios; i++) {
+				model_->ExportState(*particles[i], fout);
+			}
+
+			fout.close();
+			InitialSearch = false;
+		}
+		else
+		{
+			ofstream fout;
+			string particle_file = "Particles" + std::to_string(step_counter) + ".txt";
+			fout.open(particle_file, std::ios::trunc);
+			assert(fout.is_open());
+			fout << particles.size() << endl;
+			for (int i = 0; i < Globals::config.num_scenarios; i++) {
+				model_->ExportState(*particles[i], fout);
+			}
+			fout.close();
+		}
+	}
+
+	if (Debug_mode)
+		;//model_->PrintParticles(particles);
+	else{
+		if (Globals::config.silence != true) {
+			model_->PrintParticles(particles);
+		}
+	}
+	statistics_ = Shared_SearchStatistics();
+
+	start = get_time_second();
+	static RandomStreams streams;
+
+	if (FIX_SCENARIO == 1 || Debug_mode) {
+		std::ifstream fin;
+		string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+
+		fin.open(stream_file, std::ios::in);
+		streams.ImportStream(fin, Globals::config.num_scenarios,
+		                     Globals::config.search_depth);
+
+		fin.close();
+		cout << "[FIX_SCENARIO] random streams read from file "<< stream_file << endl;
+	} else {
+		streams = RandomStreams(Globals::config.num_scenarios,
+		                        Globals::config.search_depth);
+	}
+
+	if (FIX_SCENARIO == 2) {
+		std::ofstream fout;
+		string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+		fout.open(stream_file, std::ios::trunc);
+		fout << streams;
+		fout.close();
+	}
+
+	LookaheadUpperBound* ub = dynamic_cast<LookaheadUpperBound*>(upper_bound_);
+	if (ub != NULL) { // Avoid using new streams for LookaheadUpperBound
+		static bool initialized = false;
+		if (!initialized) {
+			lower_bound_->Init(streams);
+			upper_bound_->Init(streams);
+			initialized = true;
+		}
+	} else {
+		if (FIX_SCENARIO == 1 || Debug_mode) {
+			std::ifstream fin;
+			string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+
+			fin.open(stream_file, std::ios::in);
+			streams.ImportStream(fin, Globals::config.num_scenarios,
+			                     Globals::config.search_depth);
+			fin.close();
+
+		} else {
+			streams = RandomStreams(Globals::config.num_scenarios,
+			                        Globals::config.search_depth);
+		}
+		if (FIX_SCENARIO == 2) {
+			std::ofstream fout;
+			string stream_file = "Streams" + std::to_string(step_counter) + ".txt";
+
+			fout.open(stream_file, std::ios::trunc);
+			fout << streams;
+			fout.close();
+		}
+		lower_bound_->Init(streams);
+		upper_bound_->Init(streams);
+	}
+
+
+	if (use_GPU_) {
+		PrepareGPUStreams(streams);
+		for (int i = 0; i < particles.size(); i++) {
+			particles[i]->scenario_id = i;
+		}
+	}
+
+
+	root_ = ConstructTree(particles, streams, lower_bound_, upper_bound_,
+	                      model_, history_, Globals::config.time_per_move, &statistics_);
+	logi << "[DESPOT::Search] Time for tree construction: "
+	     << (get_time_second() - start) << "s" << endl;
+
+	return root_;
+}
+
+void DESPOT::DeleteDESPOT() {
+	double start = get_time_second();
+	root_->Free(*model_);
+	logi << "[DESPOT::Search] Time for freeing particles in search tree: "
+		<< (get_time_second() - start) << "s" << endl;
+
+	start = get_time_second();
+	delete root_;
+	logi << "[DESPOT::Search] Time for deleting tree: "
+		<< (get_time_second() - start) << "s" << endl;
+	logi << "[DESPOT::Search] Search statistics:" << endl << statistics_
+		<< endl;
+
+	assert(use_GPU_ == Globals::config.useGPU);
+	if (use_GPU_) {
+		PrintGPUData(Num_searches);
+		cout << "[DESPOT::Search] Search statistics:" << endl << statistics_
+		     << endl;
+	} else {
+		PrintCPUTime(Num_searches);
+		cout << "[DESPOT::Search] Search statistics:" << endl << statistics_
+		     << endl;
+	}
+	Initial_upper.push_back(statistics_.initial_ub);
+	Initial_lower.push_back(statistics_.initial_lb);
+	Final_upper.push_back(statistics_.final_ub);
+	Final_lower.push_back(statistics_.final_lb);
+}
+
 double DESPOT::CheckDESPOT(const VNode* vnode, double regularized_value) {
 	cout
 	        << "--------------------------------------------------------------------------------"
@@ -1158,6 +1546,60 @@ void DESPOT::OptimalAction2(VNode* vnode) {
 		}
 	}
 	return;
+}
+
+vector<vector<ValuedAction>> DESPOT::OptimalActionSequence(VNode* vnode, ScenarioLowerBound* lower_bound,
+                    ScenarioUpperBound* upper_bound, const DSPOMDP* model,
+                    RandomStreams& streams, History& history) {
+	const auto particles = vnode->particles();
+	vector<vector<ValuedAction>> action_sequence(particles.size());
+
+	vector<VNode*> to_search;
+	to_search.push_back(vnode);
+	VNode* vnode_current;
+
+	while (!to_search.empty()) {
+		vnode_current = to_search.back();
+
+		to_search.pop_back();
+		const auto active_particles = vnode_current->particles();
+		ValuedAction astar(-1, Globals::NEG_INFTY);
+		QNode *qnode_opt = nullptr;
+		for (ACT_TYPE action = 0; action < vnode_current->children().size(); action++) {
+			QNode *qnode = vnode_current->Child(action);
+			if (qnode->lower_bound() > astar.value) {
+				astar = ValuedAction(action, qnode->lower_bound());
+				qnode_opt = qnode;
+			}
+		}
+
+        if (vnode_current->depth() < Globals::config.search_depth && vnode_current->IsLeaf()) {
+            Expand(vnode_current, lower_bound, upper_bound, model, streams, history);
+            qnode_opt = vnode_current->Child(vnode_current->default_move().action);
+        }
+
+		if (!qnode_opt) {
+			astar = vnode_current->default_move();
+		}
+
+		for (unsigned i = 0; i < particles.size(); i++)	{
+			for (unsigned j = 0; j < active_particles.size(); j++)	{
+				if (particles[i]->scenario_id == active_particles[j]->scenario_id) {
+					action_sequence[i].push_back(astar);
+					break;
+				}
+			}
+		}
+
+		if(!qnode_opt) {
+			continue;
+		}
+		for (auto const& [key, val] : qnode_opt->children()) {
+			to_search.push_back(val);
+		}
+	}
+
+	return action_sequence;
 }
 
 ValuedAction DESPOT::OptimalAction(VNode* vnode) {

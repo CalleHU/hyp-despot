@@ -1,6 +1,8 @@
 #ifndef DESPOT_H
 #define DESPOT_H
 
+#include <vector>
+
 #include <despot/core/solver.h>
 #include <despot/interface/pomdp.h>
 #include <despot/interface/belief.h>
@@ -59,6 +61,12 @@ public:
 	virtual ~DESPOT();
 
 	ValuedAction Search();
+	std::vector<std::vector<ValuedAction>> SearchSequence();
+	void DeleteDESPOT();
+	VNode* ConstructDESPOT();
+	static std::vector<std::vector<ValuedAction>> OptimalActionSequence(VNode* vnode, ScenarioLowerBound* lower_bound,
+                    ScenarioUpperBound* upper_bound, const DSPOMDP* model,
+                    RandomStreams& streams, History& history);
 
 	void belief(Belief* b);
 	void BeliefUpdate(ACT_TYPE action, OBS_TYPE obs);
@@ -90,6 +98,7 @@ protected:
 	static void Expand(VNode* vnode,
 		ScenarioLowerBound* lower_bound, ScenarioUpperBound* upper_bound,
 		const DSPOMDP* model, RandomStreams& streams, History& history);
+
 	static void Expand(Shared_VNode* vnode,
 		ScenarioLowerBound* lower_bound, ScenarioUpperBound* upper_bound,
 		const DSPOMDP* model, RandomStreams& streams, History& history);
